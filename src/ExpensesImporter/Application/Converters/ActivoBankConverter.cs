@@ -1,17 +1,32 @@
 ﻿using System.Globalization;
 using System.Reflection;
 using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
 using Application.Interfaces;
-using CsvHelper;
 using CsvHelper.Configuration;
 using FluentResults;
+using Microsoft.Extensions.Logging;
 
 namespace Application.Converters;
 
 public partial class ActivoBankConverter : IConverter<Result<ActivoBankResponse>>
 {
+    private readonly ILogger<ActivoBankConverter> _logger;
+    private readonly ICategoryMapper _categoryMapper;
+    private readonly ICsvWriter _csvWriter;
+    private readonly ICsvReader _csvReader;
+
+    public ActivoBankConverter(
+        ILogger<ActivoBankConverter> logger,
+        ICategoryMapper categoryMapper,
+        ICsvWriter csvWriter,
+        ICsvReader csvReader)
+    {
+        _logger = logger;
+        _categoryMapper = categoryMapper;
+        _csvWriter = csvWriter;
+        _csvReader = csvReader;
+    }
+
     public string Name => nameof(ActivoBankConverter);
 
     public async Task<Result<ActivoBankResponse>> Convert(string path)
@@ -31,50 +46,20 @@ public partial class ActivoBankConverter : IConverter<Result<ActivoBankResponse>
                 MissingFieldFound = null
             };
 
-            using var reader = new StreamReader(path);
-            using var csv = new CsvReader(reader, config);
+            var records = await _csvReader.ReadFile<ActivoBankRecord>(path, new CsvOptions(true, ";", Encoding.UTF8));
 
-            var expensesRecord = new List<ExpenseRecord>();
+            var recordsToDto = records
+            ?.Select(record => record.ToExpenseRecord(_categoryMapper.GetCategory(record.Description)))
+            .ToList() ?? [];
 
-            await foreach (var record in csv.GetRecordsAsync<ActivoBankRecord>())
-            {
-                System.Console.WriteLine(JsonSerializer.Serialize(record));
-
-                if (record is null ||
-                record.Date == default ||
-                string.IsNullOrWhiteSpace(record.Description))
-                {
-                    continue;
-                }
-
-                expensesRecord.Add(new ExpenseRecord(
-                                    record.Date.ToString("yyyy-MM-dd"),
-                                    "No Category", // TODO: Add a category mapper
-                                    Math.Round(record.Value, 2),
-                                    ExtraSpaceRegex().Replace(record.Description, " ")));
-            }
-
-            using (var writer = new StreamWriter(writePath))
-            using (var writerCsv = new CsvWriter(writer, CultureInfo.InvariantCulture))
-            {
-                writerCsv.WriteHeader<ExpenseRecord>();
-                writerCsv.NextRecord();
-
-                foreach (var expenseRecord in expensesRecord)
-                {
-                    writerCsv.WriteRecord(expenseRecord);
-                    writerCsv.NextRecord();
-                }
-            }
+            _csvWriter.WriteToFile(writePath, recordsToDto);
 
             return Result.Ok(new ActivoBankResponse(writePath));
         }
         catch (Exception exception)
         {
+            _logger.LogError("{className}.{methodName}: there was an error - {exceptionMessage}", nameof(ActivoBankConverter), nameof(Convert), exception.Message);
             return Result.Fail(exception.ToString());
         }
     }
-
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex ExtraSpaceRegex();
 }
